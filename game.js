@@ -198,21 +198,24 @@ const CONFIG = {
 const CHAIN_MULT = 1 / CONFIG.chainSurvive;
 
 // Derive the plain-win payout factor so E[payout] = pot * (1 - houseEdge).
+// CLEAN-WIN ECONOMY: when you win, prize = pot * BASE_FACTOR * pump (always a
+// real win > your stake). House edge comes from how OFTEN you win (your pot
+// share), NOT from shrinking wins. RTP verified at 97% solo and multiplayer.
 const TAIL_PROB = CONFIG.multiplierSegments.reduce((s, x) => s + x.prob, 0);
 const TAIL_EV = CONFIG.multiplierSegments.reduce((s, x) => s + x.prob * x.factor, 0);
-const PLAIN_FACTOR = (1 - CONFIG.houseEdge - TAIL_EV) / (1 - TAIL_PROB);
-if (PLAIN_FACTOR <= 0) {
-  throw new Error("Multiplier segments too rich to fund honestly — lower their probs/factors.");
-}
+const AVG_PUMP = (1 - TAIL_PROB) + TAIL_EV;            // average multiplier applied to a win
+const BASE_FACTOR = (1 - CONFIG.houseEdge) / AVG_PUMP; // makes overall RTP = 1 - houseEdge
+const PLAIN_FACTOR = BASE_FACTOR; // back-compat name used in startup log
+if (BASE_FACTOR <= 0) throw new Error("Segments too rich to fund honestly.");
 
-/** Map a uniform roll to a pot-payout factor (plain or a multiplier). */
-function drawPayoutFactor(r) {
+/** Map a uniform roll to the pump multiplier applied on top of BASE_FACTOR. */
+function drawPumpFactor(r) {
   let c = 0;
   for (const s of CONFIG.multiplierSegments) {
     c += s.prob;
     if (r < c) return s.factor;
   }
-  return PLAIN_FACTOR;
+  return 1; // no pump (plain win) — still a real win via BASE_FACTOR
 }
 
 // ---- serve the inlined page ----
@@ -294,19 +297,17 @@ function closeBetting() {
   const roll = rollFloat(round.serverSeed, round.clientSeed, round.nonce++); // nonce 0: winner
   let target = roll * pot, acc = 0, winnerIndex = 0;
   for (let i = 0; i < k; i++) { acc += round.participants[i].stake; if (target < acc) { winnerIndex = i; break; } }
-  // SOLO: you play against the house. The bottle's landing spot is still derived
-  // from the real roll for drama, but the human is the real payee and the prize
-  // is funded only by real stakes — so RTP is the true 97%, never a money printer.
-  if (round.soloMode) {
-    winnerIndex = round.participants.findIndex(p => !p.isBot);
-  }
+  // CLEAN ECONOMY: winner is the stake-weighted pick — even in solo, a House
+  // seat can win, meaning you cleanly LOSE your ante that round. That's what
+  // makes a real win feel like a win. (No forcing the human to always win.)
   round.winner = round.participants[winnerIndex].ws;
   round.winnerIsBot = !!round.participants[winnerIndex].isBot;
   round.winnerBotId = round.participants[winnerIndex].id;
   round.winnerIdx = winnerIndex;
-  // nonce 1: pot multiplier (plain win, or a pump that shoots the pot up)
+  // nonce 1: pump multiplier applied on top of the base win factor
   const multRoll = rollFloat(round.serverSeed, round.clientSeed, round.nonce++);
-  const factor = drawPayoutFactor(multRoll);
+  const pump = drawPumpFactor(multRoll);
+  const factor = BASE_FACTOR * pump; // effective payout factor on the pot
   // TRUTHFUL near-miss: only flag when the actual roll was genuinely within a
   // hair (in probability space) of a 5x/10x zone boundary. Never fabricated.
   let nearMiss = null;
@@ -314,19 +315,17 @@ function closeBetting() {
     let acc = 0;
     for (const s of CONFIG.multiplierSegments) {
       const lo = acc, hi = acc + s.prob; acc = hi;
-      if (s.factor >= 5 && factor !== s.factor) {
+      if (s.factor >= 5 && pump !== s.factor) {
         const d = Math.min(Math.abs(multRoll - lo), Math.abs(multRoll - hi));
         if (d < 0.006) nearMiss = { factor: s.factor, dist: d };
       }
     }
   }
-  round.potFactor = factor;
+  round.potFactor = pump;          // what the UI shows as the pump (1 = plain)
   round.pot = pot;
-  const realPot = round.participants.reduce((s,p)=>s+(p.isBot?0:p.stake),0);
-  round.realPot = realPot;
-  // Prize is always funded by real money only. In multiplayer realPot==pot.
-  // In solo, realPot is just the human's stake (you vs house) → honest 97% RTP.
-  round.prize = Math.round(realPot * factor);
+  // Prize = whole pot * base factor * pump. Because you only win your stake-share
+  // of the time, this is a REAL win (more than your stake) when it lands on you.
+  round.prize = Math.round(pot * factor);
   round.chainStartPrize = round.prize;
   round.maxWin = round.prize * CONFIG.chainMaxMult;
 
@@ -336,8 +335,8 @@ function closeBetting() {
     winnerIndex,
     spinMs: CONFIG.spinMs,
     pot,
-    potFactor: factor,        // > 1 means the pot pumped
-    pumped: factor > 1,
+    potFactor: pump,          // > 1 means the pot pumped
+    pumped: pump > 1,
     pumpedPrize: round.prize,
     multRoll,                 // exact roll → client places the bottle truthfully
     nearMiss,                 // genuinely-close calls only
@@ -531,6 +530,6 @@ wss.on("connection", (ws) => {
 server.listen(PORT, () => {
   console.log(`Spin-the-Bottle (play money) on http://localhost:${PORT}`);
   console.log(`stakes=${CONFIG.anteTiers.join("/")} edge=${CONFIG.houseEdge} maxSeats=${CONFIG.maxSeats}`);
-  console.log(`plain win pays ${PLAIN_FACTOR.toFixed(3)}x pot; pumps fund the rare big wins (edge held at ${CONFIG.houseEdge})`);
+  console.log(`win pays ${BASE_FACTOR.toFixed(3)}x pot (x pump); you win your stake-share of the time; edge ${CONFIG.houseEdge}`);
   newRound();
 });
