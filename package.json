@@ -2,6 +2,10 @@
   "name": "spin-the-bottle",
   "version": "1.0.0",
   "main": "game.js",
-  "scripts": { "start": "node game.js" },
-  "dependencies": { "ws": "^8.18.0" }
+  "scripts": {
+    "start": "node game.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
 }
